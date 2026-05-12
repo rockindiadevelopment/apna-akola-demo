@@ -6,77 +6,73 @@ const THEME_KEY = 'apnaAkolaTheme';
 let newsData = [];
 let currentCategory = 'All';
 let isAdmin = false;
-let firebaseReady = false;
-let db = null;
 
-// ==================== FIREBASE CONFIG ====================
-// 🔥 SETUP INSTRUCTIONS:
-// 1. Go to https://console.firebase.google.com
-// 2. Click "Add Project" → name it "apna-akola" → Continue
-// 3. In the project dashboard, click the Web icon "</>" to add a web app
-// 4. Copy the firebaseConfig object and paste it below
-// 5. Go to "Realtime Database" → "Create Database" → choose "Start in TEST mode"
-// 6. Done! Your news will now sync across all devices.
+// ==================== GOOGLE DRIVE DATABASE CONFIG ====================
+// 📋 PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW:
+// (Follow the instructions in google-apps-script.js to get this URL)
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxSIVxquTn5qCEe-BMdhfjsGD477sAo6hP28GODUy_J8rdDnJOZ1YWxhsomf03sqxPYMA/exec';
+// Example: const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx.../exec';
 
-const firebaseConfig = {
-    // ⬇️ PASTE YOUR FIREBASE CONFIG HERE ⬇️
-    apiKey: "",
-    authDomain: "",
-    databaseURL: "",
-    projectId: "",
-    storageBucket: "",
-    messagingSenderId: "",
-    appId: ""
-};
+let cloudReady = false;
+let syncInterval = null;
 
-// ==================== FIREBASE INIT ====================
-function initFirebase() {
-    try {
-        // Check if config is filled in
-        if (!firebaseConfig.apiKey || !firebaseConfig.databaseURL) {
-            console.warn('⚠️ Firebase config not set. Using localStorage only (no cross-device sync).');
-            console.warn('📋 To enable sync, follow the setup instructions in app.js');
-            return false;
-        }
-        firebase.initializeApp(firebaseConfig);
-        db = firebase.database();
-        firebaseReady = true;
-        console.log('✅ Firebase connected! Cross-device sync is active.');
-        return true;
-    } catch (err) {
-        console.error('Firebase init error:', err);
+// ==================== CLOUD STORAGE (Google Sheets via Apps Script) ====================
+
+function initCloud() {
+    if (!SCRIPT_URL) {
+        console.warn('⚠️ Google Apps Script URL not set. Using localStorage only.');
+        console.warn('📋 Follow the setup in google-apps-script.js to enable cloud sync.');
         return false;
     }
+    cloudReady = true;
+    console.log('✅ Google Drive database connected!');
+    return true;
 }
 
-// ==================== FIREBASE CRUD ====================
-function firebaseSaveNews() {
-    if (!firebaseReady || !db) return;
-    db.ref('news').set(newsData).catch(err => {
-        console.error('Firebase save error:', err);
-    });
-}
-
-function firebaseListenForChanges() {
-    if (!firebaseReady || !db) return;
-    db.ref('news').on('value', (snapshot) => {
-        const data = snapshot.val();
-        if (data && Array.isArray(data)) {
+// Load news from Google Sheets
+async function loadNewsFromCloud() {
+    if (!cloudReady) return;
+    try {
+        const res = await fetch(SCRIPT_URL);
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
             newsData = data;
-            // Also cache in localStorage for offline access
             localStorage.setItem(STORAGE_KEY, JSON.stringify(newsData));
             renderUserNews();
             updateTicker();
             if (isAdmin) renderAdminTable();
-        } else if (data === null) {
-            // Database is empty, push seed data
+        } else if (!data || (Array.isArray(data) && data.length === 0)) {
+            // Cloud is empty, push seed data
             newsData = [...seedNews];
-            firebaseSaveNews();
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(newsData));
-            renderUserNews();
-            updateTicker();
+            saveNewsToCloud();
         }
-    });
+    } catch (err) {
+        console.warn('Cloud load failed, using local cache:', err.message);
+    }
+}
+
+// Save news to Google Sheets
+function saveNewsToCloud() {
+    if (!cloudReady) return;
+    try {
+        fetch(SCRIPT_URL, {
+            method: 'POST',
+            mode: 'no-cors',
+            cache: 'no-cache',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(newsData)
+        });
+    } catch (err) {
+        console.warn('Cloud save failed:', err.message);
+    }
+}
+
+// Auto-sync: poll for changes every 30 seconds
+function startAutoSync() {
+    if (!cloudReady) return;
+    syncInterval = setInterval(() => {
+        loadNewsFromCloud();
+    }, 30000);
 }
 
 // ==================== SEED DATA ====================
@@ -120,19 +116,18 @@ const seedNews = [
 ];
 
 // ==================== INITIALIZATION ====================
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     loadTheme();
 
-    // Try Firebase first, fall back to localStorage
-    const fbOk = initFirebase();
-
-    loadNews(); // Load from localStorage (immediate, no delay)
+    // Load from localStorage first (instant, no delay)
+    loadNews();
     renderUserNews();
     updateTicker();
 
-    if (fbOk) {
-        // Listen for real-time changes from Firebase
-        firebaseListenForChanges();
+    // Then try cloud sync
+    if (initCloud()) {
+        await loadNewsFromCloud();
+        startAutoSync();
     }
 });
 
@@ -145,7 +140,6 @@ function loadTheme() {
 }
 
 function toggleTheme() {
-    // Toggle still works if user wants light mode temporarily
     document.documentElement.classList.toggle('dark');
     const isDark = document.documentElement.classList.contains('dark');
     if (!isDark) {
@@ -175,10 +169,10 @@ function loadNews() {
 }
 
 function saveNews() {
-    // Always save to localStorage (offline cache)
+    // Save to localStorage (offline cache)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newsData));
-    // Also push to Firebase for cross-device sync
-    firebaseSaveNews();
+    // Save to Google Sheets (cloud sync)
+    saveNewsToCloud();
 }
 
 // ==================== TOAST NOTIFICATIONS ====================
@@ -225,7 +219,9 @@ function showView(view) {
         document.getElementById('btn-admin-logout').classList.add('hidden');
         document.getElementById('ticker-bar').classList.remove('hidden');
         isAdmin = false;
-        renderUserNews();
+        // Refresh from cloud when switching to user view
+        if (cloudReady) loadNewsFromCloud();
+        else renderUserNews();
     } else if (view === 'login') {
         const loginView = document.getElementById('view-login');
         loginView.classList.remove('hidden');
@@ -341,7 +337,7 @@ function openReadModal(id) {
 
     const fallbackImg = `https://images.unsplash.com/photo-1504711434969-e33886168d5c?w=600&q=80`;
     document.getElementById('modal-img').src = news.image || fallbackImg;
-    document.getElementById('modal-img').onerror = function() { this.src = fallbackImg; };
+    document.getElementById('modal-img').onerror = function () { this.src = fallbackImg; };
     document.getElementById('modal-cat').textContent = news.category;
     document.getElementById('modal-title').textContent = news.title;
     document.getElementById('modal-body').textContent = news.content;
@@ -353,7 +349,6 @@ function openReadModal(id) {
     const content = document.getElementById('modal-content');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
-    // Trigger animation
     requestAnimationFrame(() => {
         content.classList.remove('scale-95', 'opacity-0');
         content.classList.add('modal-animate-in');
@@ -434,14 +429,12 @@ function handlePostSubmit(e) {
     const content = document.getElementById('post-content').value.trim();
 
     if (editId) {
-        // Edit existing
         const idx = newsData.findIndex(n => n.id === parseInt(editId));
         if (idx !== -1) {
             newsData[idx] = { ...newsData[idx], title, category, image, content };
             showToast('Post updated successfully!', 'success');
         }
     } else {
-        // Add new
         const newPost = {
             id: Date.now(),
             title, category, image, content,
